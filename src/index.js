@@ -6,7 +6,7 @@ const DEFAULT_BASE = 'https://game.mahjongsoul.com/';
 
 
 // If true, attempt to claim the daily revive coin once and buy as many green gifts as possible with available coin.
-const BUY_GREEN_GIFT = true;
+const BUY_GREEN_GIFT = false;
 
 const GREEN_GIFT_PRICE_GOLD = 15000;
 const GREEN_GIFT_MAX_COUNT_PER_GOODS = 4;
