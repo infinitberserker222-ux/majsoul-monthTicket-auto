@@ -4,6 +4,13 @@ const WebSocket = require('ws');
 
 const DEFAULT_BASE = 'https://game.mahjongsoul.com/';
 
+
+// If true, attempt to claim the daily revive coin once and buy as many green gifts as possible with available coin.
+const BUY_GREEN_GIFT = true;
+
+const GREEN_GIFT_PRICE_GOLD = 15000;
+const GREEN_GIFT_MAX_COUNT_PER_GOODS = 4;
+
 function normalizeBase(raw) {
   const value = (raw || '').trim();
   if (!value) {
@@ -95,9 +102,12 @@ function loadProtoTypes(liqiJson) {
     ReqHeatBeat: root.lookupType('lq.ReqHeatBeat'),
     ReqOauth2Auth: root.lookupType('lq.ReqOauth2Auth'),
     ReqOauth2Login: root.lookupType('lq.ReqOauth2Login'),
+    ReqBuyFromZHP: root.lookupType('lq.ReqBuyFromZHP'),
     ReqCommon: root.lookupType('lq.ReqCommon'),
     ResOauth2Auth: root.lookupType('lq.ResOauth2Auth'),
-    ResOauth2Login: root.lookupType('lq.ResLogin'), // ResOauth2Login이 없으므로 ResLogin 사용
+    ResOauth2Login: root.lookupType('lq.ResLogin'),
+    ResCommon: root.lookupType('lq.ResCommon'),
+    ResShopInfo: root.lookupType('lq.ResShopInfo'),
     ResPayMonthTicket: root.lookupType('lq.ResPayMonthTicket'),
     ResFetchMonthTicketInfo: root.lookupType('lq.ResMonthTicketInfo')
   };
@@ -374,6 +384,8 @@ async function run() {
     if (!loginResponse.account) {
       throw new Error('oauth2Login failed: account not found.');
     }
+    const loginGold = Number(loginResponse.account.gold ?? 0);
+    console.log('oauth2Login.account.gold:', loginGold);
 
     const payWrapper = await channel.sendRequest(
       '.lq.Lobby.payMonthTicket',
@@ -388,6 +400,69 @@ async function run() {
     );
     const infoResponse = decode(proto.ResFetchMonthTicketInfo, infoWrapper.data);
     console.log('fetchMonthTicketInfo:', JSON.stringify(infoResponse));
+
+    if (BUY_GREEN_GIFT) {
+      const gainReviveCoinWrapper = await channel.sendRequest(
+        '.lq.Lobby.gainReviveCoin',
+        encode(proto.ReqCommon, {})
+      );
+      const gainReviveCoinResponse = decode(proto.ResCommon, gainReviveCoinWrapper.data);
+      const gainReviveCoinErrorCode = Number(gainReviveCoinResponse?.error?.code ?? 0);
+      if (gainReviveCoinErrorCode === 0) {
+        console.log('gainReviveCoin: success');
+      } else {
+        console.log('gainReviveCoin: skipped', JSON.stringify(gainReviveCoinResponse));
+      }
+
+      const shopInfoWrapper = await channel.sendRequest(
+        '.lq.Lobby.fetchShopInfo',
+        encode(proto.ReqCommon, {})
+      );
+      const shopInfoResponse = decode(proto.ResShopInfo, shopInfoWrapper.data);
+      if (!shopInfoResponse.shop_info?.zhp) {
+        throw new Error('fetchShopInfo failed: shop_info.zhp not found.');
+      }
+      const zhpGoods = shopInfoResponse.shop_info.zhp.goods ?? [];
+      console.log('fetchShopInfo.shop_info.zhp.goods:', JSON.stringify(zhpGoods));
+
+      const greenGoodsIds = zhpGoods.slice(0, 4).map(Number).filter(id => Number.isInteger(id) && id > 0);
+      const maxTotalBuyable = Math.floor(loginGold / GREEN_GIFT_PRICE_GOLD);
+      let remainingPurchaseCount = Math.min(
+        maxTotalBuyable,
+        greenGoodsIds.length * GREEN_GIFT_MAX_COUNT_PER_GOODS
+      );
+      let spentGold = 0;
+      const purchasePlan = [];
+
+      for (const goodsId of greenGoodsIds) {
+        if (remainingPurchaseCount <= 0) {
+          break;
+        }
+
+        const count = Math.min(GREEN_GIFT_MAX_COUNT_PER_GOODS, remainingPurchaseCount);
+        if (count <= 0) {
+          continue;
+        }
+
+        const buyWrapper = await channel.sendRequest(
+          '.lq.Lobby.buyFromZHP',
+          encode(proto.ReqBuyFromZHP, { goods_id: goodsId, count })
+        );
+        const buyResponse = decode(proto.ResCommon, buyWrapper.data);
+        const errorCode = Number(buyResponse?.error?.code ?? 0);
+        if (errorCode !== 0) {
+          throw new Error(`buyFromZHP failed for goods_id=${goodsId} count=${count}: ${JSON.stringify(buyResponse)}`);
+        }
+
+        purchasePlan.push({ goods_id: goodsId, count });
+        remainingPurchaseCount -= count;
+        spentGold += count * GREEN_GIFT_PRICE_GOLD;
+      }
+
+      console.log('buyFromZHP.purchasePlan:', JSON.stringify(purchasePlan));
+      console.log('buyFromZHP.spentGold:', spentGold);
+      console.log('buyFromZHP.remainingGoldEstimate:', Math.max(0, loginGold - spentGold));
+    }
   } finally {
     await channel.close();
   }
